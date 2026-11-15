@@ -1,0 +1,39 @@
+{
+  "apiVersion": 2,
+  "id": "token-usage",
+  "name": "Token Usage",
+  "version": "1.1.0",
+  "description": "Расход токенов по моделям для CLI-агентов (Hermes, Codex, Claude Code, OpenCode) с выбором приложения и периода.",
+  "description.ru": "Расход токенов по моделям для CLI-агентов (Hermes, Codex, Claude Code, OpenCode) с выбором приложения и периода.",
+  "description.en": "Token usage per model for CLI agents (Hermes, Codex, Claude Code, OpenCode) with app and period selection.",
+  "author": "Fox-note",
+  "permissions": ["storage"],
+  "contributions": [
+    {
+      "id": "usage-canvas",
+      "kind": "canvas-app",
+      "title": "Расход токенов",
+      "description": "Карточка на канвасе: расход токенов по моделям по приложениям и периодам",
+      "entry": "app/index.html",
+      "defaultSize": { "width": 980, "height": 640 },
+      "minSize": { "width": 520, "height": 360 }
+    },
+    {
+      "id": "usage-window",
+      "kind": "window",
+      "title": "Расход токенов (окно)",
+      "description": "Отдельное окно вне канваса: расход токенов по моделям по приложениям и периодам",
+      "entry": "app/index.html",
+      "defaultSize": { "width": 1180, "height": 760 },
+      "minSize": { "width": 820, "height": 520 }
+    }
+  ],
+  "services": [
+    {
+      "id": "usage",
+      "title": "Token usage collector",
+      "description": "Читает локальные журналы и базы CLI-агентов и считает токены по моделям",
+      "entry": "services/usage.mjs"
+    }
+  ]
+}

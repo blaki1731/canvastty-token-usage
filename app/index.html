@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Расход токенов</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <div>
+          <h1>Расход токенов</h1>
+          <p>по моделям CLI-агентов</p>
+        </div>
+      </div>
+      <nav id="app-list" aria-label="Приложения"></nav>
+      <div class="side-foot" id="side-status">CanvasTTY · token-usage</div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div class="title">
+          <h2 id="current-app">Все приложения</h2>
+          <p id="current-range"></p>
+        </div>
+        <div class="controls">
+          <div class="segmented" id="range-presets"></div>
+          <div class="custom-range" id="custom-range">
+            <input type="datetime-local" id="from-input" aria-label="Начало периода">
+            <span>—</span>
+            <input type="datetime-local" id="to-input" aria-label="Конец периода">
+            <button id="apply-range" class="btn" type="button">Применить</button>
+          </div>
+          <button id="refresh" class="btn icon" type="button" title="Обновить" aria-label="Обновить">⟳</button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <section id="summary" class="summary"></section>
+
+      <section class="panel">
+        <h3>Модели</h3>
+        <div class="table-wrap">
+          <table id="models-table"></table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>По дням</h3>
+        <div id="chart"></div>
+      </section>
+
+      <footer id="sources" class="sources"></footer>
+    </main>
+  </div>
+  <script src="canvastty-plugin://host/sdk.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

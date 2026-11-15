@@ -27,9 +27,9 @@ CLI-агентов. Есть две формы вывода:
 
 Удаление: `uninstall.bat` + перезапуск CanvasTTY.
 
-> В `plugins.json` прописан технический `sourceUrl` (`https://github.com/local/...`),
-> поэтому проверка обновлений для плагина не работает — это локальная установка.
-> Для обновления просто перезапустите `install.bat` и перезапустите CanvasTTY.
+> Репозиторий: https://github.com/blaki1731/canvastty-token-usage (приватный).
+> Установить можно и из CanvasTTY: Настройки → Плагины → установка по URL репозитория.
+> Для обновления — `install.bat`, затем перезапуск CanvasTTY.
 
 > Карточка на канвасе открывается в sandboxed-iframe (`sandbox="allow-scripts"`,
 > опаковый origin): её `localStorage` недоступен, но хранилище плагина работает —

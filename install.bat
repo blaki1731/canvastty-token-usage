@@ -18,7 +18,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$reg=@{};" ^
   "if(Test-Path $p){ try{ $reg=Get-Content $p -Raw|ConvertFrom-Json }catch{} };" ^
   "if(-not $reg.PSObject.Properties['token-usage']){" ^
-  "  $entry=[pscustomobject]@{sourceUrl='https://github.com/local/canvastty-token-usage';enabled=$true;installedAt=[int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds());selectedModules=@();enabledHooks=@()};" ^
+  "  $entry=[pscustomobject]@{sourceUrl='https://github.com/blaki1731/canvastty-token-usage';enabled=$true;installedAt=[int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds());selectedModules=@();enabledHooks=@()};" ^
   "  $reg | Add-Member -NotePropertyName 'token-usage' -NotePropertyValue $entry -Force;" ^
   "  $json=$reg | ConvertTo-Json -Depth 6;" ^
   "  [System.IO.File]::WriteAllText($p,$json,(New-Object System.Text.UTF8Encoding($false)));" ^

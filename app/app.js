@@ -195,6 +195,14 @@ function forwardResizeToCanvas(factor, direction) {
 }
 
 function wireResizeHotkeys() {
+  // A click inside this iframe never reaches the canvas document (cross-origin
+  // iframe), so the card would never look selected and the canvas-wide
+  // Ctrl+/Ctrl- handler would have no target. Tell the host we were clicked.
+  if (window.parent !== window) {
+    window.addEventListener("pointerdown", () => {
+      window.parent.postMessage({ source: "canvastty-plugin-hotkey", type: "activate" }, "*");
+    }, true);
+  }
   window.addEventListener("keydown", (event) => {
     if (!event.ctrlKey || event.altKey || event.metaKey) return;
     const target = event.target;

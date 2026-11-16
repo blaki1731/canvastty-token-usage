@@ -9,9 +9,51 @@ const state = {
   to: null,
   data: null,
   apps: [],
+  theme: null,
+  bgMode: "mono",
   loading: false,
   error: null,
 };
+
+const BG_MODES = [
+  { id: "mono", label: "Монохром" },
+  { id: "canvas", label: "Как в Canvas" },
+  { id: "glass", label: "Полупрозрачный" },
+];
+
+const THEME_VARS = ["surface", "surfaceSoft", "surfaceElevated", "primary", "text", "muted", "border", "canvas"];
+
+function camelToKebab(value) {
+  return value.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
+}
+
+function applyTheme(theme) {
+  if (!theme) return;
+  const root = document.documentElement;
+  for (const key of THEME_VARS) {
+    if (theme[key]) root.style.setProperty(`--${camelToKebab(key)}`, theme[key]);
+  }
+  if (theme.shadow) root.style.setProperty("--shadow-lg", theme.shadow);
+}
+
+function applyBgMode() {
+  document.body.classList.toggle("standalone", window.parent === window);
+  for (const mode of BG_MODES) {
+    document.body.classList.toggle(`bg-${mode.id}`, state.bgMode === mode.id);
+  }
+  for (const button of document.querySelectorAll("#bg-switch button")) {
+    button.classList.toggle("active", button.dataset.bg === state.bgMode);
+  }
+}
+
+async function loadTheme() {
+  if (!sdk) return;
+  try {
+    const theme = await call("theme.get", {});
+    state.theme = theme;
+    applyTheme(theme);
+  } catch {}
+}
 
 const PRESETS = [
   { id: "24h", label: "24 ч", hours: 24 },
@@ -104,6 +146,71 @@ function pluralRu(n, one, few, many) {
   if (mod10 === 1 && mod100 !== 11) return one;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
   return many;
+}
+
+// Window resize hotkeys, mirroring the canvas-tty-plugins "resize" plugin:
+// Ctrl + "+" / "-" scales by 1.15 (420x260 .. 1600x1100), and a Ctrl + arrow
+// pressed shortly before grows the window/card towards that side.
+const RESIZE_FACTOR = 1.15;
+const RESIZE_MIN_W = 420, RESIZE_MIN_H = 260, RESIZE_MAX_W = 1600, RESIZE_MAX_H = 1100;
+const RESIZE_ARROW_MS = 1200;
+let resizeDirection = null;
+let resizeDirectionAt = 0;
+
+function clamp(value, low, high) {
+  return Math.min(high, Math.max(low, value));
+}
+
+function resizeKeyDirection(event) {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
+    return event.key;
+  }
+  return String(event.code || "").startsWith("Arrow") ? event.code : null;
+}
+
+function resizeOwnWindow(factor, direction) {
+  const x = window.screenX, y = window.screenY, width = window.outerWidth, height = window.outerHeight;
+  const right = x + width, bottom = y + height;
+  let nextWidth = width, nextHeight = height, nextX = x, nextY = y;
+  if (direction === "ArrowLeft" || direction === "ArrowRight") {
+    nextWidth = clamp(Math.round(width * factor), RESIZE_MIN_W, RESIZE_MAX_W);
+    if (direction === "ArrowLeft") nextX = right - nextWidth;
+  } else if (direction === "ArrowUp" || direction === "ArrowDown") {
+    nextHeight = clamp(Math.round(height * factor), RESIZE_MIN_H, RESIZE_MAX_H);
+    if (direction === "ArrowUp") nextY = bottom - nextHeight;
+  } else {
+    nextWidth = clamp(Math.round(width * factor), RESIZE_MIN_W, RESIZE_MAX_W);
+    nextHeight = clamp(Math.round(height * factor), RESIZE_MIN_H, RESIZE_MAX_H);
+  }
+  if (nextWidth === width && nextHeight === height) return;
+  window.resizeTo(nextWidth, nextHeight);
+  if (nextX !== x || nextY !== y) window.moveTo(nextX, nextY);
+}
+
+function forwardResizeToCanvas(factor, direction) {
+  window.parent.postMessage({ source: "canvastty-plugin-hotkey", type: "resize", factor, direction }, "*");
+}
+
+function wireResizeHotkeys() {
+  window.addEventListener("keydown", (event) => {
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    const target = event.target;
+    if (target && target.closest && target.closest("input, textarea, select, [contenteditable='true']")) return;
+    const direction = resizeKeyDirection(event);
+    if (direction) {
+      resizeDirection = direction;
+      resizeDirectionAt = Date.now();
+      return;
+    }
+    const plus = event.key === "+" || event.key === "=" || event.code === "NumpadAdd";
+    const minus = event.key === "-" || event.key === "_" || event.code === "NumpadSubtract";
+    if (!plus && !minus) return;
+    event.preventDefault();
+    const armed = Date.now() - resizeDirectionAt <= RESIZE_ARROW_MS ? resizeDirection : null;
+    const factor = plus ? RESIZE_FACTOR : 1 / RESIZE_FACTOR;
+    if (window.parent === window) resizeOwnWindow(factor, armed);
+    else forwardResizeToCanvas(factor, armed);
+  }, true);
 }
 
 function el(id) {
@@ -416,7 +523,7 @@ function renderSources() {
 function saveUiState() {
   if (!sdk?.storage) return;
   sdk.storage
-    .set("ui-state", { app: state.app, preset: state.preset, from: state.from, to: state.to })
+    .set("ui-state", { app: state.app, preset: state.preset, from: state.from, to: state.to, bgMode: state.bgMode })
     .catch(() => {});
 }
 
@@ -429,12 +536,20 @@ async function restoreUiState() {
       if (typeof saved.preset === "string") state.preset = saved.preset;
       if (Number.isFinite(saved.from)) state.from = saved.from;
       if (Number.isFinite(saved.to)) state.to = saved.to;
+      if (BG_MODES.some((mode) => mode.id === saved.bgMode)) state.bgMode = saved.bgMode;
     }
   } catch {}
 }
 
 function wireControls() {
   el("refresh").addEventListener("click", load);
+  for (const button of el("bg-switch").querySelectorAll("button")) {
+    button.addEventListener("click", () => {
+      state.bgMode = button.dataset.bg;
+      saveUiState();
+      applyBgMode();
+    });
+  }
   el("apply-range").addEventListener("click", () => {
     const from = new Date(el("from-input").value).getTime();
     const to = new Date(el("to-input").value).getTime();
@@ -462,7 +577,10 @@ async function main() {
     if (visibility === "visible") load();
   });
   wireControls();
+  wireResizeHotkeys();
   await restoreUiState();
+  applyBgMode();
+  await loadTheme();
   await load();
   setInterval(() => {
     if (document.visibilityState === "visible") load();

@@ -10,6 +10,25 @@ import readline from "node:readline";
 const DAY_MS = 86400000;
 const RETENTION_MS = 30 * DAY_MS;
 
+// CanvasTTY look: palette surfaces, canvas colours and app skins, mirroring
+// the renderer's own theme tokens so the plugin window can match the app.
+const PALETTES = {
+  default: { surface: "#353442", surfaceSoft: "#424251", surfaceElevated: "#4a4a5a", primary: "#b8cf99", text: "#f8f7f1", muted: "#747584", canvas: "#aaa7a2" },
+  lilac: { surface: "#37333e", surfaceSoft: "#494351", surfaceElevated: "#524b5c", primary: "#bfc9ee", text: "#f8f7f1", muted: "#8b8798", canvas: "#b8adb9" },
+  night: { surface: "#161923", surfaceSoft: "#2e3341", surfaceElevated: "#3a4052", primary: "#a7c991", text: "#f8f7f1", muted: "#747584", canvas: "#222632" },
+};
+const CANVAS_COLORS = {
+  default: "#aaa7a2", lilac: "#b8adb9", night: "#222632", sage: "#aaa7a2",
+  sand: "#b9ad96", mist: "#a9b9bd", rose: "#b9a6ad", slate: "#262b36",
+};
+const SKINS = {
+  atelier: { surface: "#211f1c", surfaceSoft: "#2f2c27", surfaceElevated: "#37332e", primary: "#d97746", text: "#f2eee8", muted: "#9c9384", border: "rgba(198,180,156,.24)", canvas: "#191816", shadow: "0 10px 28px rgba(12,11,10,.52)" },
+  signal: { surface: "#151920", surfaceSoft: "#222a36", surfaceElevated: "#2a3443", primary: "#f59e0b", text: "#f8fafc", muted: "#8494a8", border: "rgba(100,130,165,.28)", canvas: "#0f1216", shadow: "0 10px 30px rgba(5,7,9,.65)" },
+  greenhouse: { surface: "#131f18", surfaceSoft: "#203529", surfaceElevated: "#294234", primary: "#34d399", text: "#f0fdf4", muted: "#7ca387", border: "rgba(110,175,135,.26)", canvas: "#0e1511", shadow: "0 10px 28px rgba(4,8,6,.65)" },
+  midnight: { surface: "#0f1624", surfaceSoft: "#1d2b45", surfaceElevated: "#253657", primary: "#38bdf8", text: "#f8fafc", muted: "#788ba8", border: "rgba(105,145,220,.26)", canvas: "#090c13", shadow: "0 10px 30px rgba(3,5,8,.72)" },
+};
+
+
 // ---------------------------------------------------------------- JSON-RPC IO
 
 let ctx = { pluginId: "", serviceId: "", dataDir: "", locale: "en", hostVersion: "" };
@@ -80,6 +99,9 @@ async function dispatch(method, params) {
     const from = finiteNumber(params.from) ?? to - RETENTION_MS;
     if (!(to >= from)) throw new Error("Invalid time range.");
     return buildReport(app, from, to);
+  }
+  if (method === "theme.get") {
+    return readTheme(process.env);
   }
   throw new Error(`Unknown method: ${String(method).slice(0, 80)}`);
 }
@@ -170,6 +192,46 @@ function homeDir() {
 function envDir(env, name) {
   const value = env[name]?.trim();
   return value && path.isAbsolute(value) ? path.normalize(value) : null;
+}
+
+// Resolve the CanvasTTY look (app skin or palette + canvas colour) so the
+// plugin window can mirror the rest of the app.
+function readTheme(env) {
+  const appData = envDir(env, "APPDATA");
+  let settings = null;
+  if (appData) {
+    try {
+      settings = JSON.parse(fs.readFileSync(path.join(appData, "canvastty", "settings.json"), "utf8"));
+    } catch {
+      settings = null;
+    }
+  }
+  const paletteName = String(settings?.palette ?? "default").toLowerCase();
+  const skinName = String(settings?.appSkin ?? "classic").toLowerCase();
+  const palette = PALETTES[paletteName] ?? PALETTES.default;
+  const skin = SKINS[skinName] ?? null;
+  const tokens = skin ?? palette;
+  const canvasColorName = String(settings?.canvasColor ?? "default").toLowerCase();
+  const canvas = skin ? tokens.canvas : CANVAS_COLORS[canvasColorName] ?? palette.canvas;
+  return {
+    surface: tokens.surface,
+    surfaceSoft: tokens.surfaceSoft,
+    surfaceElevated: tokens.surfaceElevated,
+    primary: tokens.primary,
+    text: tokens.text,
+    muted: tokens.muted,
+    border: tokens.border ?? "rgba(255,255,255,.08)",
+    canvas,
+    shadow: tokens.shadow ?? "0 30px 70px rgba(25,25,35,.34)",
+    font: '"Trebuchet MS", "Segoe UI", system-ui, sans-serif',
+    uiScale: finiteNumber(settings?.uiScale) ?? 1,
+    pattern: String(settings?.pattern ?? "none"),
+    palette: paletteName,
+    appSkin: skinName,
+    canvasColor: canvasColorName,
+    canvasBackground: String(settings?.canvasBackground ?? "none"),
+    source: skin ? "skin" : "palette",
+  };
 }
 
 // ---------------------------------------------------------------- sources

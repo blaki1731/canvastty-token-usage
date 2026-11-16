@@ -17,7 +17,17 @@
         </div>
       </div>
       <nav id="app-list" aria-label="Приложения"></nav>
-      <div class="side-foot" id="side-status">CanvasTTY · token-usage</div>
+      <div class="side-foot">
+        <div class="bg-switch" id="bg-switch">
+          <span class="bg-switch__label">Фон окна</span>
+          <div class="bg-switch__options" role="group" aria-label="Режим фона">
+            <button type="button" data-bg="mono">Монохром</button>
+            <button type="button" data-bg="canvas">Как в Canvas</button>
+            <button type="button" data-bg="glass">Полупрозрачный</button>
+          </div>
+        </div>
+        <div id="side-status">CanvasTTY · token-usage</div>
+      </div>
     </aside>
     <main>
       <header class="topbar">

@@ -27,8 +27,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 echo.
 echo Done. Restart CanvasTTY, then open the plugin from Settings -^> Plugins -^> Token Usage:
-echo   - "Расход токенов"            - карточка на канвасе (как терминал),
-echo   - "Расход токенов (окно)"     - отдельное окно вне канваса.
+echo   - "Расход токенов" — окно на рабочем столе CanvasTTY (как терминал).
 echo.
 echo Если сервис не запускается: на карточке плагина выключите и включите native code.
 exit /b 0

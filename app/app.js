@@ -37,7 +37,6 @@ function applyTheme(theme) {
 }
 
 function applyBgMode() {
-  document.body.classList.toggle("standalone", window.parent === window);
   for (const mode of BG_MODES) {
     document.body.classList.toggle(`bg-${mode.id}`, state.bgMode === mode.id);
   }
@@ -157,10 +156,6 @@ const RESIZE_ARROW_MS = 1200;
 let resizeDirection = null;
 let resizeDirectionAt = 0;
 
-function clamp(value, low, high) {
-  return Math.min(high, Math.max(low, value));
-}
-
 function resizeKeyDirection(event) {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
     return event.key;
@@ -168,26 +163,9 @@ function resizeKeyDirection(event) {
   return String(event.code || "").startsWith("Arrow") ? event.code : null;
 }
 
-function resizeOwnWindow(factor, direction) {
-  const x = window.screenX, y = window.screenY, width = window.outerWidth, height = window.outerHeight;
-  const right = x + width, bottom = y + height;
-  let nextWidth = width, nextHeight = height, nextX = x, nextY = y;
-  if (direction === "ArrowLeft" || direction === "ArrowRight") {
-    nextWidth = clamp(Math.round(width * factor), RESIZE_MIN_W, RESIZE_MAX_W);
-    if (direction === "ArrowLeft") nextX = right - nextWidth;
-  } else if (direction === "ArrowUp" || direction === "ArrowDown") {
-    nextHeight = clamp(Math.round(height * factor), RESIZE_MIN_H, RESIZE_MAX_H);
-    if (direction === "ArrowUp") nextY = bottom - nextHeight;
-  } else {
-    nextWidth = clamp(Math.round(width * factor), RESIZE_MIN_W, RESIZE_MAX_W);
-    nextHeight = clamp(Math.round(height * factor), RESIZE_MIN_H, RESIZE_MAX_H);
-  }
-  if (nextWidth === width && nextHeight === height) return;
-  window.resizeTo(nextWidth, nextHeight);
-  if (nextX !== x || nextY !== y) window.moveTo(nextX, nextY);
-}
-
 function forwardResizeToCanvas(factor, direction) {
+  // The plugin lives in a canvas card; the resize plugin's hook (in the main
+  // window) resizes the card that owns this iframe.
   window.parent.postMessage({ source: "canvastty-plugin-hotkey", type: "resize", factor, direction }, "*");
 }
 
@@ -208,8 +186,7 @@ function wireResizeHotkeys() {
     event.preventDefault();
     const armed = Date.now() - resizeDirectionAt <= RESIZE_ARROW_MS ? resizeDirection : null;
     const factor = plus ? RESIZE_FACTOR : 1 / RESIZE_FACTOR;
-    if (window.parent === window) resizeOwnWindow(factor, armed);
-    else forwardResizeToCanvas(factor, armed);
+    forwardResizeToCanvas(factor, armed);
   }, true);
 }
 

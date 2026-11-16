@@ -23,11 +23,22 @@ html, body {
   overflow: hidden;
 }
 
+body.standalone { padding: 10px; }
+
 #app {
   display: flex;
   height: 100%;
   background: var(--surface);
   transition: background 0.2s ease;
+}
+
+/* CanvasTTY-style window frame for the standalone Electron window; the app
+   draws the same frame itself for canvas cards. */
+body.standalone #app {
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
 }
 
 /* Background modes, picked by the switcher in the sidebar. */

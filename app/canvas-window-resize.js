@@ -5,33 +5,43 @@
  *   Ctrl + '+' / '-'            resize the selected window
  *   Ctrl + Arrow, then '+'/'-'  resize towards that side
  *
- *   - CanvasTTY main window      -> resizes the selected layer. Plugin cards
- *                                  are selected by a click even though the app
- *                                  only marks them selected for groups; plugin
- *                                  iframes report their clicks back so the card
- *                                  lights up like a terminal.
+ *   - CanvasTTY main window      -> resizes the selected layer. Plugin cards are
+ *                                   selected by a click (the app only marks them
+ *                                   selected for groups), so the card lights up
+ *                                   like a terminal.
  *   - Plugin canvas card (iframe)-> forwards the hotkey to the host, which
- *                                  resizes the card.
+ *                                   resizes the card.
  *   - Standalone Electron window -> resizes the OS window itself
- *                                  (window.resizeTo / moveTo).
+ *                                   (window.resizeTo / moveTo).
  *
  * Integration (newer resize plugin):
  *   1. drop this file next to the plugin (addons/canvas-window-resize.js);
- *   2. include it in the injected hook after the plugin code, or load it in a
- *      plugin page with <script src="..."> — it auto-installs;
- *   3. it exposes window.CanvasWindowResize = { install, plan, selectedLayers,
+ *   2. include it before the resize plugin code, or load it in a plugin page with
+ *      <script src="..."> — it auto-installs;
+ *   3. API: window.CanvasWindowResize = { install, configure, plan, selectedLayers,
  *      resizeSelected, resizeElectronWindow, context };
- *   4. it sets window.__canvasWindowResizeActive, and an older resize hook can
- *      yield by checking that flag before handling Ctrl + '+' / '-'.
+ *   4. it sets window.__canvasWindowResizeActive, and an older resize hook yields
+ *      by checking that flag before handling Ctrl + '+' / '-'.
  *
- * Options (install(options)): factor, minWidth, minHeight, maxWidth, maxHeight,
- * arrowWindowMs, messageSource, extraSources, onEmptySelection, onGrowClamped.
+ * Options: factor, minWidth, minHeight, maxWidth, maxHeight, arrowWindowMs,
+ * messageSource, extraSources, onEmptySelection, onGrowClamped, notify.
+ * `notify` (default on) shows the new size for a moment and says when the window
+ * is already at the limit the app allows (plugin cards are clamped to 1600x1100
+ * by CanvasTTY itself, so at the top Ctrl + '+' legitimately does nothing).
+ *
+ * v1.1.0: per-window singleton (the loader may evaluate this file twice, which
+ * used to apply the factor twice), deterministic target selection (the clicked
+ * card stays the target even if the pointer leaves it), stopPropagation so no
+ * other handler also reacts to the chord, and the on-screen size readout.
  */
 (function (root, factory) {
-  var api = factory(root);
+  var existing = root.__canvasWindowResizeSingleton;
+  var api = existing || factory(root);
   if (typeof module === "object" && module.exports) module.exports = api;
   root.CanvasWindowResize = api;
-  if (root && root.document && root.__canvasWindowResizeAutostart !== false) api.install();
+  if (!existing && root && root.document && root.__canvasWindowResizeAutostart !== false) {
+    api.install();
+  }
 }(typeof window !== "undefined" ? window : globalThis, function (root) {
   "use strict";
 
@@ -46,7 +56,8 @@
     // Older hooks posted their hotkeys with this source; keep accepting it.
     extraSources: ["canvastty-plugin-hotkey"],
     onEmptySelection: null,
-    onGrowClamped: null
+    onGrowClamped: null,
+    notify: true
   };
 
   var state = {
@@ -106,8 +117,55 @@
     return { position: p, size: { width: w, height: h } };
   }
 
-  function changed(before, next) {
-    return before.size.width !== next.size.width || before.size.height !== next.size.height;
+  // Accepts either bounds ({position, size}) or a bare size ({width, height}).
+  function sameSize(a, b) {
+    var x = a.size || a, y = b.size || b;
+    return x.width === y.width && x.height === y.height;
+  }
+
+  // ------------------------------------------------------------- feedback
+
+  function describe(size) {
+    return Math.round(size.width) + " \u00d7 " + Math.round(size.height);
+  }
+
+  // A short on-screen readout: it is the only way to tell a real resize apart
+  // from "nothing happened" at the app's size limit.
+  function notify(text) {
+    if (!state.options.notify) return;
+    var doc = root.document;
+    if (!doc || !doc.body) return;
+    var el = doc.getElementById("cwr-toast");
+    if (!el) {
+      el = doc.createElement("div");
+      el.id = "cwr-toast";
+      el.setAttribute("aria-live", "polite");
+      el.style.cssText = [
+        "position:fixed", "left:50%", "bottom:26px", "transform:translateX(-50%)",
+        "z-index:2147483000", "pointer-events:none",
+        "font:13px/1.45 'Trebuchet MS','Segoe UI',system-ui,sans-serif",
+        "color:#f8f7f1", "background:rgba(24,24,32,.94)",
+        "border:1px solid rgba(255,255,255,.16)", "border-radius:10px",
+        "padding:8px 16px", "box-shadow:0 12px 32px rgba(0,0,0,.5)",
+        "opacity:0", "transition:opacity .18s ease", "white-space:nowrap"
+      ].join(";");
+      doc.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.style.opacity = "1";
+    if (el.__cwrTimer) clearTimeout(el.__cwrTimer);
+    el.__cwrTimer = setTimeout(function () { el.style.opacity = "0"; }, 1600);
+  }
+
+  function notifyBounds(before, next, factor) {
+    var b = before.size || before;
+    var n = next.size || next;
+    if (sameSize(b, n)) {
+      notify(describe(n) + (factor > 1 ? " \u00b7 \u043c\u0430\u043a\u0441\u0438\u043c\u0443\u043c" : " \u00b7 \u043c\u0438\u043d\u0438\u043c\u0443\u043c"));
+      return false;
+    }
+    notify(describe(n));
+    return true;
   }
 
   // ------------------------------------------------------------- selection
@@ -145,6 +203,12 @@
     return out;
   }
 
+  function layerOfCard(card) {
+    var layer = card && card.getAttribute("data-canvas-layer-id");
+    if (!layer || layer.indexOf(":") < 0) return null;
+    return { kind: layer.slice(0, layer.indexOf(":")), id: layer.slice(layer.indexOf(":") + 1) };
+  }
+
   function selectPluginCard(card) {
     var cards = root.document.querySelectorAll(".plugin-canvas-card");
     for (var i = 0; i < cards.length; i++) {
@@ -173,21 +237,11 @@
   }
 
   function frameLayer(source) {
-    var card = frameCard(source);
-    var layer = card && card.getAttribute("data-canvas-layer-id");
-    if (!layer || layer.indexOf(":") < 0) return null;
-    return { kind: layer.slice(0, layer.indexOf(":")), id: layer.slice(layer.indexOf(":") + 1) };
+    return layerOfCard(frameCard(source));
   }
 
-  function layerOfCard(card) {
-    var layer = card && card.getAttribute("data-canvas-layer-id");
-    if (!layer || layer.indexOf(":") < 0) return null;
-    return { kind: layer.slice(0, layer.indexOf(":")), id: layer.slice(layer.indexOf(":") + 1) };
-  }
-
-  // The cursor position lets a bare Ctrl+/Ctrl- still find the plugin window
-  // under the mouse, even if the click never selected it (a re-render can drop
-  // the class, and a click on the card chrome is not always a selection).
+  // The cursor position lets a bare Ctrl+/Ctrl- find the plugin window under
+  // the mouse even when the click never selected it.
   function cardAtPointer() {
     if (!state.pointer) return null;
     var el = root.document.elementFromPoint(state.pointer.x, state.pointer.y);
@@ -195,6 +249,38 @@
   }
 
   // ------------------------------------------------------------- host resize
+
+  // CanvasTTY keeps a plugin card's size in its own React state and only
+  // re-renders the card when its onBoundsChange handler runs. Writing
+  // settings.pluginCanvas alone changes the stored value but not the window on
+  // screen (and the next header click writes the stale size back). So reach the
+  // card's own handler through the React fiber and call it, exactly like a drag
+  // of the app's resize handle would.
+  function appBoundsHandler(layer) {
+    var doc = root.document;
+    if (!doc) return null;
+    var want = layer.kind + ":" + layer.id;
+    var nodes = doc.querySelectorAll("[data-canvas-layer-id]");
+    var el = null;
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute("data-canvas-layer-id") === want) { el = nodes[i]; break; }
+    }
+    if (!el) return null;
+    var keys = Object.keys(el), key = null;
+    for (var k = 0; k < keys.length; k++) {
+      if (keys[k].indexOf("__reactFiber$") === 0) { key = keys[k]; break; }
+    }
+    if (!key) return null;
+    var fiber = el[key], guard = 0;
+    while (fiber && guard++ < 80) {
+      var p = fiber.memoizedProps;
+      if (p && typeof p.onBoundsChange === "function" && p.instance && p.instance.id) {
+        return function (bounds) { p.onBoundsChange(p.instance.id, bounds); };
+      }
+      fiber = fiber.return;
+    }
+    return null;
+  }
 
   function hostResizeLayer(layer, factor, dir) {
     var api = root.canvasTTY;
@@ -205,7 +291,9 @@
         for (var i = 0; i < sessions.length; i++) {
           var s = sessions[i];
           if (s.id === layer.id && s.position && s.size) {
-            api.terminal.setBounds(layer.id, plan(s, factor, dir));
+            var next = plan(s, factor, dir);
+            api.terminal.setBounds(layer.id, next);
+            notifyBounds(s, next, factor);
             return true;
           }
         }
@@ -218,7 +306,9 @@
         var materials = (snap && snap.materials) || [];
         for (var i = 0; i < materials.length; i++) {
           if (materials[i].id === layer.id && materials[i].position && materials[i].size) {
-            api.materials.setBounds(layer.id, plan(materials[i], factor, dir));
+            var next = plan(materials[i], factor, dir);
+            api.materials.setBounds(layer.id, next);
+            notifyBounds(materials[i], next, factor);
             return true;
           }
         }
@@ -236,18 +326,37 @@
       else if (layer.kind === "browser") {
         var browser = settings.browserCanvas;
         if (!browser || !browser.position || !browser.size) return false;
-        return api.settings.update({ browserCanvas: plan(browser, factor, dir) })
-          .then(function () { return true; }, function () { return false; });
+        var bnext = plan(browser, factor, dir);
+        var bapply = appBoundsHandler(layer);
+        if (bapply) {
+          bapply(bnext);
+          notifyBounds(browser, bnext, factor);
+          return true;
+        }
+        return api.settings.update({ browserCanvas: bnext }).then(function () {
+          notifyBounds(browser, bnext, factor);
+          return true;
+        }, function () { return false; });
       } else {
         return false;
       }
       for (var i = 0; i < list.length; i++) {
         if (list[i].id !== layer.id || !list[i].position || !list[i].size) continue;
         var next = plan(list[i], factor, dir);
-        if (!changed(list[i], next)) return false;
+        var moved = !sameSize(list[i], next);
+        // Preferred path: the app's own handler, so the card re-renders.
+        var apply = appBoundsHandler(layer);
+        if (apply) {
+          apply(next);
+          notifyBounds(list[i], next, factor);
+          return moved;
+        }
         var patch = {};
         patch[key] = list.map(function (x) { return x.id === layer.id ? Object.assign({}, x, next) : x; });
-        return api.settings.update(patch).then(function () { return true; }, function () { return false; });
+        return api.settings.update(patch).then(function () {
+          notifyBounds(list[i], next, factor);
+          return moved;
+        }, function () { return false; });
       }
       return false;
     });
@@ -256,14 +365,10 @@
   function hostResizeSelected(factor, dir) {
     var layers = selectedLayers();
     if (!layers.length) {
-      var hover = layerOfCard(cardAtPointer());
-      if (hover) { hostResizeLayer(hover, factor, dir); return 1; }
-      // The card the user clicked last stays the target even if the pointer
-      // moved away, so "click the window, then Ctrl + +/-" is deterministic.
-      if (state.activeCardId) {
-        hostResizeLayer({ kind: "plugin", id: state.activeCardId }, factor, dir);
-        return 1;
-      }
+      // 1. the plugin window under the cursor, 2. the plugin window last clicked.
+      var target = layerOfCard(cardAtPointer());
+      if (!target && state.activeCardId) target = { kind: "plugin", id: state.activeCardId };
+      if (target) { hostResizeLayer(target, factor, dir); return 1; }
       if (typeof state.options.onEmptySelection === "function") state.options.onEmptySelection(factor > 1);
       return 0;
     }
@@ -281,8 +386,8 @@
   // ---------------------------------------------------------- electron window
 
   // Electron plugin windows report stale outerWidth/outerHeight (the renderer
-  // keeps the size the window was created with), so the addon tracks the size
-  // it asked for instead of trusting the window metrics.
+  // keeps the size the window was created with), so the addon tracks the size it
+  // asked for instead of trusting the window metrics.
   var LOGICAL_KEY = "canvas-window-resize.size";
 
   function loadLogicalSize() {
@@ -306,12 +411,10 @@
     } catch (e) {}
   }
 
-  // Standalone Electron window: resize the OS window itself.
   function resizeOwnWindow(factor, dir) {
     var cur = loadLogicalSize();
     var next = plan({ position: { x: 0, y: 0 }, size: cur }, factor, dir);
     var nw = next.size.width, nh = next.size.height;
-    if (nw === cur.width && nh === cur.height) return false;
     var x = root.screenX, y = root.screenY;
     var nx = x, ny = y;
     if (dir === "left") nx = x + cur.width - nw;
@@ -319,6 +422,7 @@
     root.resizeTo(nw, nh);
     if (nx !== x || ny !== y) root.moveTo(nx, ny);
     saveLogicalSize({ width: nw, height: nh });
+    notifyBounds({ size: cur }, next, factor);
     return true;
   }
 
@@ -368,6 +472,8 @@
     var minus = e.key === "-" || e.key === "_" || e.code === "NumpadSubtract";
     if (!plus && !minus) return;
     e.preventDefault();
+    // Nobody else should react to this chord: the addon owns Ctrl + '+' / '-'.
+    e.stopPropagation();
     applyResize(plus ? state.options.factor : 1 / state.options.factor, currentDirection());
   }
 
@@ -389,11 +495,6 @@
     // canvastty-plugin:. This covers the moment before the preload bridge is up.
     if (root.location && root.location.protocol === "file:") return "host";
     return "window";
-  }
-
-  function boot() {
-    if (state.context) return;
-    start(detectContext());
   }
 
   function start(context) {
@@ -454,7 +555,7 @@
     if (state.options) return state;
     state.options = Object.assign({}, DEFAULTS, options || {});
     if (!resizePluginOn()) return state;
-    boot();
+    start(detectContext());
     return state;
   }
 
@@ -464,7 +565,7 @@
     return state.options;
   }
 
-  return {
+  var api = {
     install: install,
     configure: configure,
     plan: plan,
@@ -472,6 +573,9 @@
     selectedLayers: function () { return state.context === "host" ? selectedLayers() : []; },
     resizeSelected: function (factor, dir) { return hostResizeSelected(factor, dir); },
     resizeElectronWindow: resizeOwnWindow,
-    version: "1.0.0"
+    version: "1.1.0"
   };
+
+  root.__canvasWindowResizeSingleton = api;
+  return api;
 }));

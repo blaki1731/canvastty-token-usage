@@ -54,6 +54,8 @@
     context: null,      // "host" | "frame" | "window"
     direction: null,
     directionAt: 0,
+    pointer: null,
+    activeCardId: null,
     hostInstalled: false,
     clientInstalled: false
   };
@@ -148,12 +150,17 @@
     for (var i = 0; i < cards.length; i++) {
       if (cards[i] !== card) cards[i].classList.remove("plugin-canvas-card--selected");
     }
-    if (card) card.classList.add("plugin-canvas-card--selected");
+    if (card) {
+      card.classList.add("plugin-canvas-card--selected");
+      var layer = layerOfCard(card);
+      if (layer) state.activeCardId = layer.id;
+    }
   }
 
   function clearPluginSelection() {
     var cards = root.document.querySelectorAll(".plugin-canvas-card--selected");
     for (var i = 0; i < cards.length; i++) cards[i].classList.remove("plugin-canvas-card--selected");
+    state.activeCardId = null;
   }
 
   function frameCard(source) {
@@ -170,6 +177,21 @@
     var layer = card && card.getAttribute("data-canvas-layer-id");
     if (!layer || layer.indexOf(":") < 0) return null;
     return { kind: layer.slice(0, layer.indexOf(":")), id: layer.slice(layer.indexOf(":") + 1) };
+  }
+
+  function layerOfCard(card) {
+    var layer = card && card.getAttribute("data-canvas-layer-id");
+    if (!layer || layer.indexOf(":") < 0) return null;
+    return { kind: layer.slice(0, layer.indexOf(":")), id: layer.slice(layer.indexOf(":") + 1) };
+  }
+
+  // The cursor position lets a bare Ctrl+/Ctrl- still find the plugin window
+  // under the mouse, even if the click never selected it (a re-render can drop
+  // the class, and a click on the card chrome is not always a selection).
+  function cardAtPointer() {
+    if (!state.pointer) return null;
+    var el = root.document.elementFromPoint(state.pointer.x, state.pointer.y);
+    return el && el.closest ? el.closest(".plugin-canvas-card") : null;
   }
 
   // ------------------------------------------------------------- host resize
@@ -234,6 +256,14 @@
   function hostResizeSelected(factor, dir) {
     var layers = selectedLayers();
     if (!layers.length) {
+      var hover = layerOfCard(cardAtPointer());
+      if (hover) { hostResizeLayer(hover, factor, dir); return 1; }
+      // The card the user clicked last stays the target even if the pointer
+      // moved away, so "click the window, then Ctrl + +/-" is deterministic.
+      if (state.activeCardId) {
+        hostResizeLayer({ kind: "plugin", id: state.activeCardId }, factor, dir);
+        return 1;
+      }
       if (typeof state.options.onEmptySelection === "function") state.options.onEmptySelection(factor > 1);
       return 0;
     }
@@ -374,6 +404,10 @@
     root.__canvasWindowResizeActive = true;
   }
 
+  function trackPointer(e) {
+    state.pointer = { x: e.clientX, y: e.clientY };
+  }
+
   function installHost() {
     if (state.hostInstalled) return;
     state.hostInstalled = true;
@@ -387,6 +421,8 @@
     root.addEventListener("keyup", onKeyup, true);
     root.addEventListener("blur", clearDirection, true);
     root.addEventListener("message", onMessage);
+    root.addEventListener("pointermove", trackPointer, { capture: true, passive: true });
+    root.addEventListener("mousemove", trackPointer, { capture: true, passive: true });
   }
 
   function installClient() {

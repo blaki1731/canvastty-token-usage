@@ -93,12 +93,29 @@ async function dispatch(method, params) {
     };
   }
   if (method === "apps.list") {
-    const report = await buildReport("all", null, null);
+    const now = Date.now();
+    const report = await buildReport("all", now - RETENTION_MS, now);
     return {
       apps: report.apps,
       sources: report.sources,
       generatedAt: report.generatedAt,
     };
+  }
+  if (method === "sessions.list") {
+    const app = typeof params.app === "string" && params.app ? params.app : "all";
+    const now = Date.now();
+    const to = finiteNumber(params.to) ?? now;
+    const from = finiteNumber(params.from) ?? to - RETENTION_MS;
+    if (!(to >= from)) throw new Error("Invalid time range.");
+    const limitWindowMs = finiteNumber(params.limitWindowMs) ?? LIMIT_WINDOWS[0].ms;
+    return buildSessions(app, from, to, limitWindowMs);
+  }
+  if (method === "sessions.detail") {
+    const app = text(params.app);
+    const session = text(params.session);
+    if (!app || !session) throw new Error("app and session are required.");
+    const limitWindowMs = finiteNumber(params.limitWindowMs) ?? LIMIT_WINDOWS[0].ms;
+    return buildSessionDetail(app, session, limitWindowMs);
   }
   if (method === "usage.query") {
     const app = typeof params.app === "string" && params.app ? params.app : "all";
@@ -156,6 +173,162 @@ function dayKey(atMs) {
 
 function covers(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => value >= b[index]);
+}
+
+// Session settings are shown verbatim in the UI, so keep them bounded.
+function clip(value, max = 2000) {
+  const str = text(value);
+  if (str.length <= max) return str;
+  return `${str.slice(0, max)}… (+${str.length - max})`;
+}
+
+function safeJson(value, max = 4000) {
+  const str = text(value);
+  if (!str) return null;
+  try {
+    const parsed = JSON.parse(str);
+    return clip(typeof parsed === "string" ? parsed : JSON.stringify(parsed), max);
+  } catch {
+    return clip(str, max);
+  }
+}
+
+function sessionSummary(settings, fallbackId) {
+  return {
+    session: settings?.session ?? fallbackId,
+    app: settings?.app ?? "",
+    title: settings?.title ?? (fallbackId ? `${String(fallbackId).slice(0, 12)}…` : ""),
+    model: settings?.model ?? "",
+    provider: settings?.provider ?? "",
+    cwd: settings?.cwd ?? "",
+    gitBranch: settings?.gitBranch ?? "",
+    source: settings?.source ?? settings?.originator ?? "",
+    startedAt: settings?.startedAt ?? null,
+    endedAt: settings?.endedAt ?? null,
+    endReason: settings?.endReason ?? "",
+    messages: settings?.messages ?? 0,
+    toolCalls: settings?.toolCalls ?? 0,
+    apiCalls: settings?.apiCalls ?? 0,
+  };
+}
+
+function hermesSession(row, profile) {
+  return {
+    session: text(row.id),
+    app: "hermes",
+    title: text(row.title) || text(row.display_name) || `${text(row.id).slice(0, 10)}…`,
+    model: text(row.model),
+    provider: text(row.billing_provider),
+    baseUrl: text(row.billing_base_url),
+    mode: text(row.billing_mode),
+    cwd: text(row.cwd),
+    gitBranch: text(row.git_branch),
+    gitRepoRoot: text(row.git_repo_root),
+    source: text(row.source),
+    createdSource: text(row.created_source),
+    startedAt: ms(row.started_at),
+    endedAt: ms(row.ended_at),
+    endReason: text(row.end_reason),
+    messages: asInt(row.message_count) ?? 0,
+    toolCalls: asInt(row.tool_call_count) ?? 0,
+    apiCalls: asInt(row.api_call_count) ?? 0,
+    systemPrompt: clip(row.system_prompt, 4000),
+    modelConfig: safeJson(row.model_config),
+    profile: text(row.profile_name) || text(profile),
+    lastActivityAt: ms(row.last_activity_at),
+  };
+}
+
+function opencodeSession(row) {
+  return {
+    session: text(row.id),
+    app: "opencode",
+    title: text(row.title) || text(row.slug) || `${text(row.id).slice(0, 12)}…`,
+    model: text(row.model),
+    provider: "",
+    baseUrl: "",
+    mode: "",
+    cwd: text(row.directory) || text(row.path),
+    gitBranch: "",
+    gitRepoRoot: "",
+    source: "opencode",
+    createdSource: "",
+    startedAt: epochMs(row.c),
+    endedAt: epochMs(row.u),
+    endReason: "",
+    messages: 0,
+    toolCalls: 0,
+    apiCalls: 0,
+    systemPrompt: "",
+    modelConfig: null,
+    agent: text(row.agent),
+    version: text(row.version),
+    parentId: text(row.parent_id),
+    shareUrl: text(row.share_url),
+    cost: finite(row.cost) ?? 0,
+    profile: "",
+    lastActivityAt: epochMs(row.u),
+  };
+}
+
+function codexSession(payload, id) {
+  return {
+    session: text(payload.id) || text(id),
+    app: "codex",
+    title: `${text(payload.id || id).slice(0, 12)}…`,
+    model: text(payload.model) || text(payload.orig_model),
+    provider: text(payload.provider),
+    baseUrl: text(payload.base_url) || text(payload.provider_url),
+    mode: "",
+    cwd: text(payload.cwd) || text(payload.git_repo_dir),
+    gitBranch: "",
+    gitRepoRoot: text(payload.git_repo_dir),
+    source: text(payload.source),
+    createdSource: text(payload.originator),
+    originator: text(payload.originator),
+    cliVersion: text(payload.cli_version),
+    startedAt: Date.parse(payload.timestamp) || null,
+    endedAt: null,
+    endReason: "",
+    messages: 0,
+    toolCalls: 0,
+    apiCalls: 0,
+    systemPrompt: clip(payload.instructions, 4000),
+    modelConfig: null,
+    profile: "",
+    lastActivityAt: null,
+  };
+}
+
+function claudeSession(record) {
+  const message = isRecord(record.message) ? record.message : {};
+  return {
+    session: text(record.sessionId),
+    app: "claude",
+    title: `${text(record.sessionId).slice(0, 12)}…`,
+    model: text(message.model),
+    provider: "",
+    baseUrl: "",
+    mode: "",
+    cwd: text(record.cwd),
+    gitBranch: text(record.gitBranch),
+    gitRepoRoot: "",
+    source: text(record.source),
+    createdSource: "",
+    version: text(record.version),
+    userType: text(record.userType),
+    isSidechain: Boolean(record.isSidechain),
+    startedAt: Date.parse(record.timestamp) || null,
+    endedAt: null,
+    endReason: "",
+    messages: 0,
+    toolCalls: 0,
+    apiCalls: 0,
+    systemPrompt: "",
+    modelConfig: null,
+    profile: "",
+    lastActivityAt: null,
+  };
 }
 
 function walk(root, maxDepth = 8) {
@@ -349,7 +522,7 @@ function openReadOnly(database) {
   return new DatabaseSync(database, { readOnly: true });
 }
 
-function hermesRecords(env, events, status) {
+function hermesRecords(env, events, status, sessions) {
   let databases = 0;
   let rowsCount = 0;
   for (const home of hermesHomes(env)) {
@@ -361,6 +534,7 @@ function hermesRecords(env, events, status) {
       continue;
     }
     databases += 1;
+    const localIds = new Set();
     try {
       const tableInfo = db.prepare("SELECT name FROM pragma_table_info('session_model_usage')").all();
       const hasModel = tableInfo.some((row) => row.name === "model");
@@ -396,11 +570,13 @@ function hermesRecords(env, events, status) {
         const reasoning = asIntOrZero(row.r);
         if (!input && !output) continue;
         const model = text(row.model) || text(row.provider) || text(row.task) || "unknown";
+        localIds.add(text(row.id));
         events.push({
           app: "hermes",
           profile: home.name,
           session: text(row.id) || "unknown",
           model,
+          task: text(row.task),
           input,
           output,
           cached,
@@ -410,6 +586,22 @@ function hermesRecords(env, events, status) {
           to,
           timing: "span",
         });
+      }
+      if (sessions && localIds.size) {
+        const ids = [...localIds];
+        const placeholders = ids.map(() => "?").join(",");
+        const meta = db
+          .prepare(
+            `SELECT id, model, billing_provider, billing_base_url, billing_mode, cwd, git_branch, git_repo_root,
+                    title, display_name, source, created_source, started_at, ended_at, end_reason,
+                    message_count, tool_call_count, api_call_count, system_prompt, model_config,
+                    last_activity_at, profile_name, transport_profile
+             FROM sessions WHERE id IN (${placeholders})`,
+          )
+          .all(...ids);
+        for (const row of meta) {
+          sessions.set(`hermes\u0000${text(row.id)}`, hermesSession(row, home.name));
+        }
       }
       status.hermes = {
         state: "ok",
@@ -427,7 +619,7 @@ function hermesRecords(env, events, status) {
   return events;
 }
 
-function opencodeRecords(env, events, status) {
+function opencodeRecords(env, events, status, sessions) {
   let databases = 0;
   let rowsCount = 0;
   for (const home of opencodeHomes(env)) {
@@ -451,7 +643,12 @@ function opencodeRecords(env, events, status) {
                   COALESCE(tokens_input, 0) AS i, COALESCE(tokens_output, 0) AS o,
                   COALESCE(tokens_reasoning, 0) AS r,
                   COALESCE(tokens_cache_read, 0) AS cr, COALESCE(tokens_cache_write, 0) AS cw,
-                  time_created AS c, time_updated AS u
+                  time_created AS c, time_updated AS u,
+                  COALESCE(title, '') AS title, COALESCE(slug, '') AS slug,
+                  COALESCE(directory, '') AS directory, COALESCE(path, '') AS path,
+                  COALESCE(version, '') AS version, COALESCE(agent, '') AS agent,
+                  COALESCE(cost, 0) AS cost, COALESCE(parent_id, '') AS parent_id,
+                  COALESCE(share_url, '') AS share_url
            FROM session_v2`,
         )
         .all();
@@ -462,12 +659,14 @@ function opencodeRecords(env, events, status) {
         if (from === null) continue;
         const input = asIntOrZero(row.i) + asIntOrZero(row.cr) + asIntOrZero(row.cw);
         const output = asIntOrZero(row.o);
+        if (sessions) sessions.set(`opencode\u0000${text(row.id)}`, opencodeSession(row));
         if (!input && !output) continue;
         events.push({
           app: "opencode",
           profile: home.name,
           session: text(row.id),
           model: text(row.model) || "unknown",
+          task: "",
           input,
           output,
           cached: asIntOrZero(row.cr),
@@ -511,7 +710,7 @@ function codexApp(originator) {
   return /cli/i.test(originator) ? "Codex CLI" : "Codex";
 }
 
-async function codexRecords(env, events, status) {
+async function codexRecords(env, events, status, sessions) {
   const roots = logRoots(env).filter((root) => root.source === "codex");
   let files = 0;
   let counted = 0;
@@ -541,6 +740,7 @@ async function codexRecords(env, events, status) {
             if (/hermes/i.test(text(payload.originator))) state.external = true;
             if (text(payload.model)) state.model = text(payload.model);
           }
+          if (sessions && id) sessions.set(`codex\u0000${id}`, codexSession(payload, state.session));
           continue;
         }
         if (record.type === "turn_context") {
@@ -571,6 +771,7 @@ async function codexRecords(env, events, status) {
           profile: root.profile,
           session: state.session || path.basename(file.path),
           model: state.model || "unknown",
+          task: "",
           input: delta[0],
           output: delta[2],
           cached: Math.min(delta[1], delta[0]),
@@ -590,7 +791,7 @@ async function codexRecords(env, events, status) {
   return events;
 }
 
-async function claudeRecords(env, events, status) {
+async function claudeRecords(env, events, status, sessions) {
   const roots = logRoots(env).filter((root) => root.source === "claude");
   let files = 0;
   let counted = 0;
@@ -601,7 +802,7 @@ async function claudeRecords(env, events, status) {
       const stream = fs.createReadStream(file.path, { encoding: "utf8" });
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
       for await (const line of rl) {
-        if (!line || !line.includes('"usage"')) continue;
+        if (!line || (!line.includes('"usage"') && !line.includes('"sessionId"'))) continue;
         let raw;
         try {
           raw = JSON.parse(line);
@@ -609,6 +810,10 @@ async function claudeRecords(env, events, status) {
           continue;
         }
         const record = isRecord(raw) ? raw : {};
+        if (sessions && record.sessionId) {
+          const key = `claude\u0000${text(record.sessionId)}`;
+          if (!sessions.has(key)) sessions.set(key, claudeSession(record));
+        }
         if (record.type !== "assistant" || record.isApiErrorMessage === true) continue;
         const message = isRecord(record.message) ? record.message : {};
         const usage = isRecord(message.usage) ? message.usage : {};
@@ -633,6 +838,7 @@ async function claudeRecords(env, events, status) {
           profile: root.profile,
           session: text(record.sessionId) || path.basename(file.path),
           model,
+          task: "",
           input: input + read + write,
           output,
           cached: read,
@@ -753,15 +959,21 @@ function limitPayload(info, longInfo, now) {
   };
 }
 
+async function collect(env) {
+  const events = [];
+  const sessions = new Map();
+  const status = {};
+  hermesRecords(env, events, status, sessions);
+  await codexRecords(env, events, status, sessions);
+  await claudeRecords(env, events, status, sessions);
+  opencodeRecords(env, events, status, sessions);
+  return { events, sessions, status };
+}
+
 async function buildReport(app, from, to, limitWindowMs = LIMIT_WINDOWS[0].ms) {
   const env = process.env;
   const generatedAt = Date.now();
-  const events = [];
-  const status = {};
-  hermesRecords(env, events, status);
-  await codexRecords(env, events, status);
-  await claudeRecords(env, events, status);
-  opencodeRecords(env, events, status);
+  const { events, status } = await collect(env);
 
   const sources = [
     { id: "hermes", label: "Hermes", state: status.hermes?.state ?? "missing", detail: status.hermes?.detail ?? "" },
@@ -921,5 +1133,117 @@ async function buildReport(app, from, to, limitWindowMs = LIMIT_WINDOWS[0].ms) {
     totals: roundTotals(totals),
     models: modelList,
     days: dayList,
+  };
+}
+
+function usageOnly(value) {
+  const rounded = roundTotals(value);
+  delete rounded.sessions;
+  return rounded;
+}
+
+// Sessions that overlap the selected range, with their lifetime token totals.
+async function buildSessions(app, from, to, limitWindowMs) {
+  const env = process.env;
+  const generatedAt = Date.now();
+  const { events, sessions } = await collect(env);
+  const scoped = app === "all" ? null : app;
+  const bySession = new Map();
+  for (const event of events) {
+    if (scoped && event.app !== scoped) continue;
+    const key = `${event.app}\u0000${event.session}`;
+    let acc = bySession.get(key);
+    if (!acc) {
+      acc = { app: event.app, session: event.session, events: [], models: new Set(), totals: emptyTotals(), firstAt: event.from, lastAt: event.to, inRange: false };
+      bySession.set(key, acc);
+    }
+    acc.events.push(event);
+    acc.models.add(event.model);
+    addTotals(acc.totals, event);
+    acc.firstAt = Math.min(acc.firstAt, event.from);
+    acc.lastAt = Math.max(acc.lastAt, event.to);
+    if (Math.min(event.to, to) >= Math.max(event.from, from)) acc.inRange = true;
+  }
+  const list = [...bySession.values()]
+    .filter((acc) => acc.inRange)
+    .map((acc) => {
+      const settings = sessions.get(`${acc.app}\u0000${acc.session}`);
+      return {
+        ...sessionSummary(settings, acc.session),
+        models: [...acc.models].sort(),
+        ...usageOnly(acc.totals),
+        firstAt: acc.firstAt,
+        lastAt: acc.lastAt,
+        limit: limitPayload(limitFor(acc.events, generatedAt, limitWindowMs), limitFor(acc.events, generatedAt, LIMIT_WINDOWS[1].ms), generatedAt),
+      };
+    })
+    .sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
+  return { app, from, to, generatedAt, count: list.length, sessions: list };
+}
+
+async function buildSessionDetail(app, session, limitWindowMs) {
+  const env = process.env;
+  const generatedAt = Date.now();
+  const { events, sessions } = await collect(env);
+  const settings = sessions.get(`${app}\u0000${session}`) ?? null;
+  const own = events.filter((event) => event.app === app && event.session === session);
+  const byModel = new Map();
+  const byTask = new Map();
+  const days = new Map();
+  const totals = emptyTotals();
+  for (const event of own) {
+    addTotals(totals, event);
+    const modelKey = event.model || "unknown";
+    let model = byModel.get(modelKey);
+    if (!model) {
+      model = { model: modelKey, ...emptyTotals(), firstAt: event.from, lastAt: event.to };
+      byModel.set(modelKey, model);
+    }
+    addTotals(model, event);
+    model.firstAt = Math.min(model.firstAt, event.from);
+    model.lastAt = Math.max(model.lastAt, event.to);
+    const taskKey = `${modelKey}\u0000${event.task || ""}`;
+    let task = byTask.get(taskKey);
+    if (!task) {
+      task = { model: modelKey, task: event.task || "", ...emptyTotals(), firstAt: event.from, lastAt: event.to };
+      byTask.set(taskKey, task);
+    }
+    addTotals(task, event);
+    task.firstAt = Math.min(task.firstAt, event.from);
+    task.lastAt = Math.max(task.lastAt, event.to);
+    distribute(event, 0, generatedAt, (dayName, fraction) => {
+      let day = days.get(dayName);
+      if (!day) {
+        day = { day: dayName, ...emptyTotals() };
+        days.set(dayName, day);
+      }
+      addTotals(day, {
+        input: event.input * fraction,
+        output: event.output * fraction,
+        cached: event.cached * fraction,
+        reasoning: event.reasoning * fraction,
+        calls: event.calls * fraction,
+      });
+    });
+  }
+  const modelList = [...byModel.values()]
+    .map((entry) => ({ ...usageOnly(entry), model: entry.model, firstAt: entry.firstAt, lastAt: entry.lastAt }))
+    .sort((a, b) => b.input + b.output - (a.input + a.output));
+  const taskList = [...byTask.values()]
+    .map((entry) => ({ ...usageOnly(entry), model: entry.model, task: entry.task, firstAt: entry.firstAt, lastAt: entry.lastAt }))
+    .sort((a, b) => b.input + b.output - (a.input + a.output));
+  const dayList = [...days.values()]
+    .sort((a, b) => (a.day < b.day ? -1 : 1))
+    .map((entry) => ({ day: entry.day, ...usageOnly(entry) }));
+  return {
+    app,
+    session,
+    generatedAt,
+    settings,
+    models: modelList,
+    tasks: taskList,
+    days: dayList,
+    totals: usageOnly(totals),
+    limit: limitPayload(limitFor(own, generatedAt, limitWindowMs), limitFor(own, generatedAt, LIMIT_WINDOWS[1].ms), generatedAt),
   };
 }

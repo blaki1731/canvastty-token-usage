@@ -2,7 +2,7 @@
   "apiVersion": 2,
   "id": "token-usage",
   "name": "Token Usage",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Расход токенов по моделям для CLI-агентов (Hermes, Codex, Claude Code, OpenCode) с выбором приложения и периода.",
   "description.ru": "Расход токенов по моделям для CLI-агентов (Hermes, Codex, Claude Code, OpenCode) с выбором приложения и периода.",
   "description.en": "Token usage per model for CLI agents (Hermes, Codex, Claude Code, OpenCode) with app and period selection.",

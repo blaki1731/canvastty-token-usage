@@ -9,6 +9,9 @@ const state = {
   to: null,
   data: null,
   apps: [],
+  sessionList: [],
+  sessionDetail: null,
+  sessionLoading: false,
   theme: null,
   bgMode: "mono",
   loading: false,
@@ -102,6 +105,36 @@ const T = {
     limitNoData: "Нет расхода в окне",
     limitNote:
       "Время восстановления лимита — оценка по скользящему окну: провайдеры считают токены запроса в течение окна, а в журналах CLI-агентов данных о лимитах нет.",
+    sessions: "Сессии",
+    session: "Сессия",
+    app: "Приложение",
+    started: "Начало",
+    ended: "Окончание",
+    messages: "Сообщения",
+    task: "Задача",
+    day: "День",
+    sessionSettings: "Настройки сессии",
+    sessionModels: "Расход по моделям",
+    sessionTasks: "Расход по задачам",
+    sessionDays: "По дням",
+    noSessions: "Нет сессий с расходом в выбранный период",
+    sessionEmpty: "Нет данных по этой сессии",
+    lifetime: "за всё время сессии",
+    close: "Закрыть",
+    yes: "да",
+    no: "нет",
+    settingsLabels: {
+      app: "Приложение", title: "Название", model: "Модель", provider: "Провайдер",
+      baseUrl: "Базовый URL", mode: "Режим", agent: "Агент", version: "Версия",
+      cwd: "Каталог", gitBranch: "Ветка git", gitRepoRoot: "Корень репозитория",
+      source: "Источник", createdSource: "Создана", originator: "Originator",
+      cliVersion: "Версия CLI", startedAt: "Начало", endedAt: "Окончание",
+      endReason: "Причина окончания", lastActivityAt: "Последняя активность",
+      messages: "Сообщений", toolCalls: "Вызовов инструментов", apiCalls: "Вызовов API",
+      cost: "Стоимость, $", profile: "Профиль", parentId: "Родительская сессия",
+      shareUrl: "Ссылка", userType: "Тип пользователя", isSidechain: "Побочная ветка",
+      systemPrompt: "System prompt", modelConfig: "Model config",
+    },
   },
   en: {
     title: "Token usage",
@@ -141,6 +174,36 @@ const T = {
     limitNoData: "Nothing spent in the window",
     limitNote:
       "Limit restoration time is an estimate based on a rolling window: providers count a request's tokens for the window length, and CLI agent logs carry no limit data.",
+    sessions: "Sessions",
+    session: "Session",
+    app: "Application",
+    started: "Started",
+    ended: "Ended",
+    messages: "Messages",
+    task: "Task",
+    day: "Day",
+    sessionSettings: "Session settings",
+    sessionModels: "Usage by model",
+    sessionTasks: "Usage by task",
+    sessionDays: "By day",
+    noSessions: "No sessions with usage in the selected period",
+    sessionEmpty: "No data for this session",
+    lifetime: "for the whole session",
+    close: "Close",
+    yes: "yes",
+    no: "no",
+    settingsLabels: {
+      app: "Application", title: "Title", model: "Model", provider: "Provider",
+      baseUrl: "Base URL", mode: "Mode", agent: "Agent", version: "Version",
+      cwd: "Directory", gitBranch: "Git branch", gitRepoRoot: "Repository root",
+      source: "Source", createdSource: "Created", originator: "Originator",
+      cliVersion: "CLI version", startedAt: "Started", endedAt: "Ended",
+      endReason: "End reason", lastActivityAt: "Last activity",
+      messages: "Messages", toolCalls: "Tool calls", apiCalls: "API calls",
+      cost: "Cost, $", profile: "Profile", parentId: "Parent session",
+      shareUrl: "Share URL", userType: "User type", isSidechain: "Sidechain",
+      systemPrompt: "System prompt", modelConfig: "Model config",
+    },
   },
 };
 
@@ -248,6 +311,12 @@ async function load() {
     state.apps = data.apps ?? [];
     state.from = data.from;
     state.to = data.to;
+    try {
+      const sessionsData = await call("sessions.list", { app: state.app, from: range.from, to: range.to });
+      state.sessionList = sessionsData.sessions ?? [];
+    } catch {
+      state.sessionList = [];
+    }
   } catch (error) {
     state.error = String(error?.message ?? error);
     state.data = null;
@@ -263,8 +332,10 @@ function render() {
   renderHeader();
   renderSummary();
   renderModels();
+  renderSessions();
   renderChart();
   renderSources();
+  renderSessionDetail();
 }
 
 function renderBanner() {
@@ -469,6 +540,204 @@ function renderModels() {
   table.append(thead, tbody);
 }
 
+const USAGE_COLUMNS = [
+  { key: "input", labelKey: "input", num: true },
+  { key: "output", labelKey: "output", num: true },
+  { key: "cached", labelKey: "cached", num: true },
+  { key: "reasoning", labelKey: "reasoning", num: true },
+  { key: "calls", labelKey: "calls", num: true },
+  { key: "tokens", labelKey: "tokensShort", num: true },
+];
+
+function fillUsageTable(table, firstColumn, rows) {
+  table.textContent = "";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = T[state.locale].sessionEmpty;
+    table.append(empty);
+    return;
+  }
+  const columns = [firstColumn, ...USAGE_COLUMNS];
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of columns) {
+    const th = document.createElement("th");
+    th.textContent = T[state.locale][column.labelKey];
+    headRow.append(th);
+  }
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    for (const column of columns) {
+      const td = document.createElement("td");
+      td.className = column.num ? "num" : "model";
+      const value = row[column.key];
+      td.textContent = column.num ? full(value ?? 0) : value || "—";
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+}
+
+function renderSessions() {
+  const table = el("sessions-table");
+  const rows = state.sessionList ?? [];
+  table.textContent = "";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = state.loading ? T[state.locale].loading : T[state.locale].noSessions;
+    table.append(empty);
+    return;
+  }
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const key of ["session", "app", "model", "tokensShort", "messages", "started", "ended"]) {
+    const th = document.createElement("th");
+    th.textContent = T[state.locale][key];
+    headRow.append(th);
+  }
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  for (const session of rows) {
+    const tr = document.createElement("tr");
+    tr.className = "link";
+    const title = document.createElement("td");
+    title.className = "model";
+    title.textContent = session.title || session.session;
+    title.title = session.session;
+    tr.append(title);
+    const app = document.createElement("td");
+    app.textContent = session.app;
+    tr.append(app);
+    const model = document.createElement("td");
+    model.textContent = session.model || (session.models || []).join(", ");
+    tr.append(model);
+    const tokens = document.createElement("td");
+    tokens.className = "num";
+    tokens.textContent = full(session.tokens);
+    tokens.title = `${T[state.locale].lifetime}: ${full(session.tokens)}`;
+    tr.append(tokens);
+    const messages = document.createElement("td");
+    messages.className = "num";
+    messages.textContent = full(session.messages || 0);
+    tr.append(messages);
+    const started = document.createElement("td");
+    started.className = "num";
+    started.textContent = session.startedAt ? fmtDate(session.startedAt) : "—";
+    tr.append(started);
+    const ended = document.createElement("td");
+    ended.className = "num";
+    ended.textContent = session.endedAt ? fmtDate(session.endedAt) : "—";
+    tr.append(ended);
+    tr.addEventListener("click", () => openSession(session.app, session.session));
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+}
+
+function settingValue(key, value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value ? T[state.locale].yes : T[state.locale].no;
+  if (typeof value === "number") {
+    if (key === "cost") return `$${value.toFixed(4)}`;
+    if (/At$/.test(key)) return fmtTime(value);
+    return full(value);
+  }
+  return String(value);
+}
+
+function renderSessionDetail() {
+  const modal = el("session-modal");
+  const detail = state.sessionDetail;
+  if (!detail) {
+    modal.hidden = !state.sessionLoading;
+    return;
+  }
+  modal.hidden = false;
+  const settings = detail.settings ?? {};
+  el("session-title").textContent = settings.title || detail.session;
+  const sub = [];
+  if (settings.app) sub.push(settings.app);
+  if (settings.model) sub.push(settings.model);
+  if (detail.totals) sub.push(`${T[state.locale].lifetime}: ${full(detail.totals.tokens ?? 0)}`);
+  el("session-sub").textContent = sub.join(" · ");
+
+  const labels = T[state.locale].settingsLabels;
+  const grid = el("session-settings");
+  grid.textContent = "";
+  for (const key of Object.keys(labels)) {
+    if (key === "systemPrompt" || key === "modelConfig") continue;
+    const value = settingValue(key, settings[key]);
+    if (value === null) continue;
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    const label = document.createElement("span");
+    label.className = "settings-label";
+    label.textContent = labels[key];
+    const field = document.createElement("span");
+    field.className = "settings-value";
+    field.textContent = value;
+    row.append(label, field);
+    grid.append(row);
+  }
+  for (const key of ["systemPrompt", "modelConfig"]) {
+    const value = settings[key];
+    if (!value) continue;
+    const block = document.createElement("div");
+    block.className = "settings-block";
+    const label = document.createElement("div");
+    label.className = "settings-label";
+    label.textContent = labels[key];
+    const pre = document.createElement("pre");
+    pre.className = "settings-pre";
+    pre.textContent = value;
+    block.append(label, pre);
+    grid.append(block);
+  }
+  fillUsageTable(el("session-models"), { key: "model", labelKey: "model" }, detail.models ?? []);
+  fillUsageTable(el("session-tasks"), { key: "task", labelKey: "task" }, detail.tasks ?? []);
+  fillUsageTable(el("session-days"), { key: "day", labelKey: "day" }, detail.days ?? []);
+}
+
+async function openSession(app, session) {
+  state.sessionDetail = null;
+  state.sessionLoading = true;
+  el("session-title").textContent = T[state.locale].loading;
+  el("session-sub").textContent = "";
+  el("session-settings").textContent = "";
+  el("session-models").textContent = "";
+  el("session-tasks").textContent = "";
+  el("session-days").textContent = "";
+  renderSessionDetail();
+  try {
+    state.sessionDetail = await call("sessions.detail", { app, session });
+  } catch (error) {
+    state.sessionDetail = {
+      app,
+      session,
+      settings: null,
+      models: [],
+      tasks: [],
+      days: [],
+      totals: null,
+      error: String(error?.message ?? error),
+    };
+  } finally {
+    state.sessionLoading = false;
+    renderSessionDetail();
+  }
+}
+
+function closeSession() {
+  state.sessionDetail = null;
+  state.sessionLoading = false;
+  renderSessionDetail();
+}
+
 function renderChart() {
   const box = el("chart");
   const days = state.data?.days ?? [];
@@ -578,6 +847,13 @@ function wireControls() {
     state.to = to;
     saveUiState();
     load();
+  });
+  el("session-close").addEventListener("click", closeSession);
+  el("session-modal").addEventListener("click", (event) => {
+    if (event.target === el("session-modal")) closeSession();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && (state.sessionDetail || state.sessionLoading)) closeSession();
   });
 }
 

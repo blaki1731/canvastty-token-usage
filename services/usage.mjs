@@ -10,6 +10,14 @@ import readline from "node:readline";
 const DAY_MS = 86400000;
 const RETENTION_MS = 30 * DAY_MS;
 
+// No CLI log stores real rate-limit headers, so the reset time can only be
+// estimated. Providers count a request's tokens for a rolling window from the
+// request itself, so the whole window frees up when its newest event ages out.
+const LIMIT_WINDOWS = [
+  { id: "short", ms: 5 * 3600 * 1000 },
+  { id: "long", ms: 7 * DAY_MS },
+];
+
 // CanvasTTY look: palette surfaces, canvas colours and app skins, mirroring
 // the renderer's own theme tokens so the plugin window can match the app.
 const PALETTES = {
@@ -98,7 +106,8 @@ async function dispatch(method, params) {
     const to = finiteNumber(params.to) ?? now;
     const from = finiteNumber(params.from) ?? to - RETENTION_MS;
     if (!(to >= from)) throw new Error("Invalid time range.");
-    return buildReport(app, from, to);
+    const limitWindowMs = finiteNumber(params.limitWindowMs) ?? LIMIT_WINDOWS[0].ms;
+    return buildReport(app, from, to, limitWindowMs);
   }
   if (method === "theme.get") {
     return readTheme(process.env);
@@ -688,8 +697,65 @@ function distribute(record, from, to, emit) {
   return true;
 }
 
-async function buildReport(app, from, to) {
+// Estimated rate-limit restoration for one group of usage events.
+// Returns null when nothing was spent inside the window.
+function limitFor(events, now, windowMs) {
+  const from = now - windowMs;
+  let found = false;
+  let first = 0;
+  let last = 0;
+  let tokens = 0;
+  let calls = 0;
+  for (const event of events) {
+    if (event.to < from) continue;
+    if (!found) {
+      first = event.from;
+      last = event.to;
+      found = true;
+    } else {
+      first = Math.min(first, event.from);
+      last = Math.max(last, event.to);
+    }
+    tokens += event.input + event.output;
+    calls += event.calls;
+  }
+  if (!found) return null;
+  const partialAt = first + windowMs;
+  const fullAt = last + windowMs;
+  return {
+    windowMs,
+    firstAt: first,
+    lastAt: last,
+    partialAt,
+    fullAt,
+    partialRemainingMs: Math.max(0, partialAt - now),
+    remainingMs: Math.max(0, fullAt - now),
+    tokens,
+    calls,
+  };
+}
+
+function limitPayload(info, longInfo, now) {
+  return {
+    estimated: true,
+    now,
+    windowMs: info?.windowMs ?? null,
+    longWindowMs: longInfo?.windowMs ?? null,
+    partialAt: info?.partialAt ?? null,
+    fullAt: info?.fullAt ?? null,
+    partialRemainingMs: info?.partialRemainingMs ?? null,
+    remainingMs: info?.remainingMs ?? null,
+    tokens: info?.tokens ?? 0,
+    calls: info?.calls ?? 0,
+    longPartialAt: longInfo?.partialAt ?? null,
+    longFullAt: longInfo?.fullAt ?? null,
+    longRemainingMs: longInfo?.remainingMs ?? null,
+  };
+}
+
+async function buildReport(app, from, to, limitWindowMs = LIMIT_WINDOWS[0].ms) {
   const env = process.env;
+  const generatedAt = Date.now();
   const events = [];
   const status = {};
   hermesRecords(env, events, status);
@@ -723,12 +789,26 @@ async function buildReport(app, from, to) {
   const days = new Map();
   const sessionsByApp = new Map();
   const modelsByApp = new Map();
+  const eventsByApp = new Map();
+  const eventsByModel = new Map();
   const totals = emptyTotals();
   const scoped = app === "all" ? null : app;
 
   for (const record of events) {
     const appSummary = apps.get(record.app);
     const inScope = !scoped || record.app === scoped;
+    let appEvents = eventsByApp.get(record.app);
+    if (!appEvents) {
+      appEvents = [];
+      eventsByApp.set(record.app, appEvents);
+    }
+    appEvents.push(record);
+    let modelEvents = eventsByModel.get(`${record.app}\u0000${record.model}`);
+    if (!modelEvents) {
+      modelEvents = [];
+      eventsByModel.set(`${record.app}\u0000${record.model}`, modelEvents);
+    }
+    modelEvents.push(record);
     let touched = false;
     distribute(record, from, to, (dayName, fraction) => {
       touched = true;
@@ -792,6 +872,17 @@ async function buildReport(app, from, to) {
     if (summary) summary.models = set.size;
   }
 
+  const longWindowMs = LIMIT_WINDOWS[1].ms;
+  for (const [appId, appEvents] of eventsByApp) {
+    const summary = apps.get(appId);
+    if (!summary) continue;
+    summary.limit = limitPayload(limitFor(appEvents, generatedAt, limitWindowMs), limitFor(appEvents, generatedAt, longWindowMs), generatedAt);
+  }
+  const limitByModel = new Map();
+  for (const [key, modelEvents] of eventsByModel) {
+    limitByModel.set(key, limitPayload(limitFor(modelEvents, generatedAt, limitWindowMs), limitFor(modelEvents, generatedAt, longWindowMs), generatedAt));
+  }
+
   const modelList = [...models.values()]
     .filter((model) => !scoped || model.app === scoped)
     .map((model) => ({
@@ -800,6 +891,7 @@ async function buildReport(app, from, to) {
       ...roundTotals(model),
       sessions: model.sessionSet.size,
       share: totals.tokens ? (model.input + model.output) / totals.tokens : 0,
+      limit: limitByModel.get(`${model.app}\u0000${model.model}`) ?? null,
     }))
     .sort((a, b) => b.input + b.output - (a.input + a.output));
 
@@ -822,7 +914,8 @@ async function buildReport(app, from, to) {
     app,
     from,
     to,
-    generatedAt: Date.now(),
+    generatedAt,
+    limits: limitPayload(limitFor(events, generatedAt, limitWindowMs), limitFor(events, generatedAt, longWindowMs), generatedAt),
     apps: [...apps.values()].map(({ tokens, lastActiveAt, ...rest }) => ({ ...rest, tokens: Math.round(tokens), lastActiveAt })),
     sources,
     totals: roundTotals(totals),

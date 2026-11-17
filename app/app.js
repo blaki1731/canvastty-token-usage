@@ -92,6 +92,16 @@ const T = {
     appReady: "готов",
     appMissing: "нет данных",
     appError: "ошибка",
+    limit: "Лимит",
+    limitFull: "Полностью восстановится",
+    limitPartial: "Начнёт освобождаться",
+    limitPartialNow: "Окно уже начинает освобождаться",
+    limitLong: "Недельное окно",
+    limitSpent: "расход в окне",
+    limitEstimated: (window) => `Оценка: скользящее окно ${window} (реальных данных о лимитах в журналах агентов нет)`,
+    limitNoData: "Нет расхода в окне",
+    limitNote:
+      "Время восстановления лимита — оценка по скользящему окну: провайдеры считают токены запроса в течение окна, а в журналах CLI-агентов данных о лимитах нет.",
   },
   en: {
     title: "Token usage",
@@ -121,6 +131,16 @@ const T = {
     appReady: "ready",
     appMissing: "no data",
     appError: "error",
+    limit: "Limit",
+    limitFull: "Fully restored",
+    limitPartial: "Starts freeing up",
+    limitPartialNow: "Window is already freeing up",
+    limitLong: "Weekly window",
+    limitSpent: "spent in window",
+    limitEstimated: (window) => `Estimate: rolling ${window} window (agent logs carry no real limit data)`,
+    limitNoData: "Nothing spent in the window",
+    limitNote:
+      "Limit restoration time is an estimate based on a rolling window: providers count a request's tokens for the window length, and CLI agent logs carry no limit data.",
   },
 };
 
@@ -146,6 +166,41 @@ function pluralRu(n, one, few, many) {
   if (mod10 === 1 && mod100 !== 11) return one;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
   return many;
+}
+
+// "5 ч 12 мин", "3 дн. 4 ч", "меньше минуты".
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalMin = Math.round(ms / 60000);
+  if (totalMin < 1) return "меньше минуты";
+  if (totalMin < 60) return `${totalMin} ${pluralRu(totalMin, "минута", "минуты", "минут")}`;
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (hours < 24) return mins ? `${hours} ч ${mins} мин` : `${hours} ч`;
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest ? `${days} дн. ${rest} ч` : `${days} дн.`;
+}
+
+function fmtWindow(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const hours = ms / 3600000;
+  if (hours < 24) return `${hours % 1 ? hours.toFixed(1) : hours} ч`;
+  return `${Math.round(hours / 24)} дн.`;
+}
+
+function limitTitle(info) {
+  if (!info || info.fullAt === null || info.fullAt === undefined) return T[state.locale].limitNoData;
+  const lines = [T[state.locale].limitEstimated(fmtWindow(info.windowMs))];
+  lines.push(`${T[state.locale].limitFull}: ${fmtTime(info.fullAt)}`);
+  if (info.partialRemainingMs > 0) {
+    lines.push(`${T[state.locale].limitPartial}: ${fmtTime(info.partialAt)} · ${fmtDuration(info.partialRemainingMs)}`);
+  } else {
+    lines.push(T[state.locale].limitPartialNow);
+  }
+  if (info.longFullAt) lines.push(`${T[state.locale].limitLong}: ${fmtTime(info.longFullAt)}`);
+  lines.push(`${T[state.locale].limitSpent}: ${full(info.tokens)}`);
+  return lines.join("\n");
 }
 
 // Window resize hotkeys live in the vendored addon (canvas-window-resize.js):
@@ -257,7 +312,17 @@ function renderAppList() {
         ? `${full(app.sessions)} ${pluralRu(app.sessions, "сессия", "сессии", "сессий")}`
         : `${app.models} ${pluralRu(app.models, "модель", "модели", "моделей")} · ${app.sessions} ${pluralRu(app.sessions, "сессия", "сессии", "сессий")}`;
     meta.textContent = app.state === "ok" ? metaText : T[state.locale][app.state === "error" ? "appError" : "appMissing"];
-    body.append(name, meta);
+    const limitInfo = app.id === "all" ? state.data?.limits : app.limit;
+    const limit = document.createElement("div");
+    limit.className = "limit";
+    if (limitInfo && limitInfo.fullAt) {
+      limit.textContent = `${T[state.locale].limit.toLowerCase()} ~${fmtDuration(limitInfo.remainingMs)}`;
+      limit.title = limitTitle(limitInfo);
+    } else {
+      limit.className = "limit dim";
+      limit.textContent = T[state.locale].limitNoData;
+    }
+    body.append(name, meta, limit);
     const tokens = document.createElement("span");
     tokens.className = "tokens";
     tokens.textContent = compact(app.tokens);
@@ -359,7 +424,7 @@ function renderModels() {
   table.textContent = "";
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const key of ["model", "input", "output", "cached", "reasoning", "calls", "sessions", "share"]) {
+  for (const key of ["model", "limit", "input", "output", "cached", "reasoning", "calls", "sessions", "share"]) {
     const th = document.createElement("th");
     th.textContent = T[state.locale][key];
     headRow.append(th);
@@ -373,6 +438,16 @@ function renderModels() {
     name.textContent = model.model;
     name.title = model.model;
     tr.append(name);
+    const limit = document.createElement("td");
+    limit.className = "num limit";
+    if (model.limit && model.limit.fullAt) {
+      limit.textContent = fmtDuration(model.limit.remainingMs);
+      limit.title = limitTitle(model.limit);
+    } else {
+      limit.textContent = "—";
+      limit.title = T[state.locale].limitNoData;
+    }
+    tr.append(limit);
     for (const key of ["input", "output", "cached", "reasoning", "calls", "sessions"]) {
       const td = document.createElement("td");
       td.className = "num";
@@ -447,6 +522,10 @@ function renderSources() {
   note.className = "row";
   note.textContent = T[state.locale].note;
   box.append(note);
+  const limitNote = document.createElement("div");
+  limitNote.className = "row dim";
+  limitNote.textContent = T[state.locale].limitNote;
+  box.append(limitNote);
   for (const source of sources) {
     const row = document.createElement("div");
     row.className = "row";
